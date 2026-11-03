@@ -70,3 +70,84 @@ describe('unified request pipeline', () => {
     expect(ElMessage.error).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('Gateway and streaming request integration', () => {
+  it.each([
+    { rspCode: 0, rspMsg: '操作成功', data: 'session' },
+    {
+      code: '000',
+      msg: 'OK',
+      data: { rspCode: 0, rspMsg: '操作成功', data: 'session' },
+    },
+  ])('returns the same final data for either envelope', async (data) => {
+    const result = await request<string>({
+      url: '/ai/room/create',
+      adapter: async (config) => ({
+        config,
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        data,
+      }),
+    })
+    expect(result).toBe('session')
+    expect(ElMessage.error).not.toHaveBeenCalled()
+  })
+  it.each([
+    [{ code: 'GATEWAY_DENIED', msg: '网关拒绝请求' }, '网关拒绝请求'],
+    [
+      { code: '000', msg: 'OK', data: { rspCode: 500, rspMsg: '创建失败' } },
+      '创建失败',
+    ],
+    [
+      { code: '000', msg: 'OK', data: 'bad' },
+      '后端响应格式不符合 ApiResult 协议',
+    ],
+  ])('notifies once for envelope errors', async (data, message) => {
+    await expect(
+      request({
+        url: '/ai/room/create',
+        adapter: async (config) => ({
+          config,
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          data,
+        }),
+      }),
+    ).rejects.toThrow(message as string)
+    expect(ElMessage.error).toHaveBeenCalledExactlyOnceWith(message)
+  })
+  it('preserves text/event-stream responses without JSON unwrapping', async () => {
+    const data = 'data: {"content":"hello"}\n\n'
+    expect(
+      await request<string>({
+        url: '/stream',
+        adapter: async (config) => ({
+          config,
+          status: 200,
+          statusText: 'OK',
+          headers: { 'content-type': 'text/event-stream; charset=UTF-8' },
+          data,
+        }),
+      }),
+    ).toBe(data)
+    expect(ElMessage.error).not.toHaveBeenCalled()
+  })
+  it('preserves explicitly requested streams', async () => {
+    const data = { streamMarker: true }
+    expect(
+      await request({
+        url: '/stream',
+        responseType: 'stream',
+        adapter: async (config) => ({
+          config,
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          data,
+        }),
+      }),
+    ).toBe(data)
+  })
+})

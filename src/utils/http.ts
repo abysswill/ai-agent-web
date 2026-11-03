@@ -1,11 +1,11 @@
 import axios, { type AxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
-import type { ApiResult } from '@/types/api'
+import type { ApiResult, GatewayResult } from '@/types/api'
 
 export class ApiError extends Error {
   constructor(
     message: string,
-    public readonly code?: number,
+    public readonly code?: number | string,
   ) {
     super(message)
     this.name = 'ApiError'
@@ -23,10 +23,7 @@ http.interceptors.request.use((config) => {
   return config
 })
 http.interceptors.response.use(
-  (response) => {
-    unwrapResult(response.data)
-    return response
-  },
+  (response) => response,
   (error: unknown) => {
     if (axios.isAxiosError(error)) {
       if (error.code === 'ERR_CANCELED') return Promise.reject(error)
@@ -52,6 +49,21 @@ http.interceptors.response.use(
 )
 
 export function unwrapResult<T>(value: unknown): T {
+  // Gateway wrapping is optional for local, direct-backend requests.
+  if (value && typeof value === 'object' && 'code' in value) {
+    if (
+      typeof value.code !== 'string' ||
+      !('msg' in value) ||
+      typeof value.msg !== 'string'
+    ) {
+      throw new ApiError('后端响应格式不符合 Gateway 协议')
+    }
+    const gateway = value as GatewayResult<unknown>
+    if (gateway.code !== '000') {
+      throw new ApiError(gateway.msg || 'Gateway 请求失败', gateway.code)
+    }
+    value = gateway.data
+  }
   if (
     !value ||
     typeof value !== 'object' ||
@@ -83,8 +95,19 @@ function notify(error: unknown) {
 /** Single error notification boundary for both transport and business errors. */
 export async function request<T>(config: AxiosRequestConfig): Promise<T> {
   try {
-    const response = await http.request<ApiResult<T>>(config)
-    return response.data.data as T
+    const response = await http.request<unknown>(config)
+    const contentType = String(response.headers['content-type'] || '')
+      .split(';')[0]
+      ?.trim()
+      .toLowerCase()
+    // Streaming bodies must be consumed by their caller, never parsed as ApiResult.
+    if (
+      contentType === 'text/event-stream' ||
+      config.responseType === 'stream'
+    ) {
+      return response.data as T
+    }
+    return unwrapResult<T>(response.data)
   } catch (error) {
     notify(error)
     throw error
